@@ -13,7 +13,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHECK_INTERVAL = 60  # 크롤링 주기 (초 단위)
 # ============================================================
 
-# Render 24시간 구동용 가짜 웹서버
+# Render 24시간 구동용 웹서버
 app = Flask('')
 @app.route('/')
 def home():
@@ -31,7 +31,7 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# 유저별 키워드 저장소 { user_id: ["키워드1", "키워드2"] }
+# 유저별 키워드 저장소 { user_id: ["hhkb", "상우"] } (소문자로 저장)
 user_keywords = {}
 seen_post_ids = set()
 
@@ -75,12 +75,28 @@ def fetch_latest_posts():
                 src = img_tag["src"]
                 img_url = src if src.startswith("http") else f"https://guheyo.com{src}"
 
+            # --- 본문(내용) 추가 수집 ---
+            content_text = ""
+            try:
+                detail_resp = requests.get(post_url, headers=headers, timeout=5)
+                if detail_resp.status_code == 200:
+                    detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
+                    body_elem = detail_soup.select_one(".post-content, .content, article, .board-view")
+                    if body_elem:
+                        content_text = body_elem.get_text(strip=True)
+            except Exception:
+                pass
+
+            # 제목 + 본문 통합 텍스트
+            full_text = f"{title} {content_text}"
+
             posts.append({
                 "id": post_id,
                 "title": title,
                 "price": price,
                 "url": post_url,
-                "image_url": img_url
+                "image_url": img_url,
+                "full_text": full_text
             })
 
         return posts
@@ -90,7 +106,7 @@ def fetch_latest_posts():
 
 # -------------------- [ 슬래시 명령어 정의 ] --------------------
 @tree.command(name="판매알림등록", description="판매글 제목/본문에 키워드가 있으면 DM을 보냅니다.")
-@app_commands.describe(키워드="등록할 검색 키워드 (최대 5개)")
+@app_commands.describe(키워드="등록할 검색 키워드 (최대 5개, 대소문자 구분 없음)")
 async def add_keyword(interaction: discord.Interaction, 키워드: str):
     user_id = interaction.user.id
     if user_id not in user_keywords:
@@ -100,19 +116,21 @@ async def add_keyword(interaction: discord.Interaction, 키워드: str):
         await interaction.response.send_message("키워드는 최대 5개까지만 등록할 수 있습니다.", ephemeral=True)
         return
 
-    clean_kw = 키워드.strip()
+    # 대소문자 구분을 위해 소문자로 변환하여 저장
+    clean_kw = 키워드.strip().lower()
+
     if clean_kw in user_keywords[user_id]:
-        await interaction.response.send_message(f"`{clean_kw}`(은)는 이미 등록된 키워드입니다.", ephemeral=True)
+        await interaction.response.send_message(f"`{clean_kw}`(은)는 이미 등록된 키워드입니다 (대소문자 구분 안 함).", ephemeral=True)
         return
 
     user_keywords[user_id].append(clean_kw)
-    await interaction.response.send_message(f"✅ 키워드 **`{clean_kw}`**(이)가 등록되었습니다! (현재 {len(user_keywords[user_id])}/5개)", ephemeral=True)
+    await interaction.response.send_message(f"✅ 키워드 **`{clean_kw}`**(이)가 등록되었습니다! (대소문자 구분 없음, 현재 {len(user_keywords[user_id])}/5개)", ephemeral=True)
 
 @tree.command(name="판매알림삭제", description="등록한 판매 알림 키워드를 삭제합니다.")
 @app_commands.describe(키워드="삭제할 키워드")
 async def delete_keyword(interaction: discord.Interaction, 키워드: str):
     user_id = interaction.user.id
-    clean_kw = 키워드.strip()
+    clean_kw = 키워드.strip().lower()
 
     if user_id in user_keywords and clean_kw in user_keywords[user_id]:
         user_keywords[user_id].remove(clean_kw)
@@ -136,7 +154,7 @@ async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(
         title="AKNotifier — 구해요 키워드 DM 알림",
         description=(
-            "`/판매알림등록 [키워드]` — 판매글에 키워드가 있을 때 DM 알림 (최대 5개)\n"
+            "`/판매알림등록 [키워드]` — 판매글 제목·본문에 키워드가 있을 때 DM 알림 (최대 5개, 대소문자 미구분)\n"
             "`/판매알림삭제 [키워드]` — 등록된 알림 삭제\n"
             "`/알림목록` — 내가 등록한 알림 목록 확인"
         ),
@@ -183,10 +201,14 @@ async def monitor_loop():
 
             seen_post_ids.add(post["id"])
 
+            # 소문자로 전환한 게시글 텍스트 (제목 + 본문)
+            post_full_text = post.get("full_text", post["title"]).lower()
+
             # 등록된 모든 유저의 키워드 비교
             for user_id, keywords in list(user_keywords.items()):
                 for kw in keywords:
-                    if kw.lower() in post["title"].lower():
+                    # kw도 소문자로 저장되어 있으므로 대소문자 미구분 매칭
+                    if kw in post_full_text:
                         try:
                             user = await client.fetch_user(user_id)
                             await send_discord_dm(user, post, kw)
@@ -196,7 +218,6 @@ async def monitor_loop():
 
 @client.event
 async def on_ready():
-    # 디스코드에 슬래시 명령어 등록 동기화
     await tree.sync()
     print(f"로그인 성공 및 슬래시 명령어 동기화 완료: {client.user.name}")
     client.loop.create_task(monitor_loop())
