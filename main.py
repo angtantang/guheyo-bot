@@ -4,17 +4,16 @@ import re
 import requests
 from bs4 import BeautifulSoup
 import discord
+from discord import app_commands
 from flask import Flask
 from threading import Thread
 
 # ==================== [ 환경 변수 설정 ] ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-TARGET_USER_ID = int(os.environ.get("TARGET_USER_ID", "0"))
-KEYWORDS = ["hhkb", "상우", "매그넘", "agar"]  # 감시할 키워드 목록
-CHECK_INTERVAL = 60                           # 크롤링 주기 (초 단위)
+CHECK_INTERVAL = 60  # 크롤링 주기 (초 단위)
 # ============================================================
 
-# Render 웹 서비스 유지용 가짜 서버 (24시간 켜둠 보장용)
+# Render 24시간 구동용 가짜 웹서버
 app = Flask('')
 @app.route('/')
 def home():
@@ -27,10 +26,16 @@ def keep_alive():
     t = Thread(target=run_flask)
     t.start()
 
+# 디스코드 클라이언트 및 슬래시 커맨드 트리 설정
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# 유저별 키워드 저장소 { user_id: ["키워드1", "키워드2"] }
+user_keywords = {}
 seen_post_ids = set()
 
+# -------------------- [ 크롤링 함수 ] --------------------
 def fetch_latest_posts():
     url = "https://guheyo.com"
     headers = {
@@ -45,7 +50,6 @@ def fetch_latest_posts():
         soup = BeautifulSoup(response.text, "html.parser")
         posts = []
 
-        # 구해요 게시글 리스트 선택
         articles = soup.select(".post-item, article, tr.board-list, .list-item")
 
         for article in articles:
@@ -84,16 +88,67 @@ def fetch_latest_posts():
         print(f"[크롤링 에러] {e}")
         return []
 
-async def send_discord_dm(user, post, matched_keyword):
+# -------------------- [ 슬래시 명령어 정의 ] --------------------
+@tree.command(name="판매알림등록", description="판매글 제목/본문에 키워드가 있으면 DM을 보냅니다.")
+@app_commands.describe(키워드="등록할 검색 키워드 (최대 5개)")
+async def add_keyword(interaction: discord.Interaction, 키워드: str):
+    user_id = interaction.user.id
+    if user_id not in user_keywords:
+        user_keywords[user_id] = []
+
+    if len(user_keywords[user_id]) >= 5:
+        await interaction.response.send_message("키워드는 최대 5개까지만 등록할 수 있습니다.", ephemeral=True)
+        return
+
+    clean_kw = 키워드.strip()
+    if clean_kw in user_keywords[user_id]:
+        await interaction.response.send_message(f"`{clean_kw}`(은)는 이미 등록된 키워드입니다.", ephemeral=True)
+        return
+
+    user_keywords[user_id].append(clean_kw)
+    await interaction.response.send_message(f"✅ 키워드 **`{clean_kw}`**(이)가 등록되었습니다! (현재 {len(user_keywords[user_id])}/5개)", ephemeral=True)
+
+@tree.command(name="판매알림삭제", description="등록한 판매 알림 키워드를 삭제합니다.")
+@app_commands.describe(키워드="삭제할 키워드")
+async def delete_keyword(interaction: discord.Interaction, 키워드: str):
+    user_id = interaction.user.id
+    clean_kw = 키워드.strip()
+
+    if user_id in user_keywords and clean_kw in user_keywords[user_id]:
+        user_keywords[user_id].remove(clean_kw)
+        await interaction.response.send_message(f"🗑️ 키워드 **`{clean_kw}`**(이)가 삭제되었습니다.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"등록되지 않은 키워드입니다: `{clean_kw}`", ephemeral=True)
+
+@tree.command(name="알림목록", description="내가 등록한 알림 키워드 목록을 확인합니다.")
+async def list_keywords(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    kws = user_keywords.get(user_id, [])
+
+    if not kws:
+        await interaction.response.send_message("등록된 키워드가 없습니다.", ephemeral=True)
+    else:
+        kw_str = "\n".join([f"- `{kw}`" for kw in kws])
+        await interaction.response.send_message(f"📋 **현재 등록된 키워드 목록 ({len(kws)}/5개)**\n{kw_str}", ephemeral=True)
+
+@tree.command(name="도움말", description="동왕 알리미 봇 사용법을 안내합니다.")
+async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="판매글 알림",
+        title="AKNotifier — 구해요 키워드 DM 알림",
+        description=(
+            "`/판매알림등록 [키워드]` — 판매글에 키워드가 있을 때 DM 알림 (최대 5개)\n"
+            "`/판매알림삭제 [키워드]` — 등록된 알림 삭제\n"
+            "`/알림목록` — 내가 등록한 알림 목록 확인"
+        ),
         color=0x2b2d31
     )
-    embed.add_field(
-        name="",
-        value=f"**[{post['title']}]({post['url']})**",
-        inline=False
-    )
+    embed.set_footer(text="알림은 봇 DM으로 전송됩니다.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# -------------------- [ 모니터링 루프 ] --------------------
+async def send_discord_dm(user, post, matched_keyword):
+    embed = discord.Embed(title="판매글 알림", color=0x2b2d31)
+    embed.add_field(name="", value=f"**[{post['title']}]({post['url']})**", inline=False)
     embed.add_field(name="가격", value=post["price"], inline=True)
     embed.add_field(name="키워드", value=matched_keyword, inline=True)
 
@@ -107,14 +162,13 @@ async def send_discord_dm(user, post, matched_keyword):
 
     try:
         await user.send(content=f"**동왕 알리미 봇**\n{header_text}", embed=embed)
-        print(f"[DM 발송 완료] {post['title']}")
     except Exception as e:
         print(f"[DM 발송 실패] {e}")
 
 async def monitor_loop():
     await client.wait_until_ready()
-    user = await client.fetch_user(TARGET_USER_ID)
 
+    # 최초 실행 시 기존 글 등록
     initial_posts = fetch_latest_posts()
     for p in initial_posts:
         seen_post_ids.add(p["id"])
@@ -129,14 +183,22 @@ async def monitor_loop():
 
             seen_post_ids.add(post["id"])
 
-            for kw in KEYWORDS:
-                if kw.lower() in post["title"].lower():
-                    await send_discord_dm(user, post, kw)
-                    break
+            # 등록된 모든 유저의 키워드 비교
+            for user_id, keywords in list(user_keywords.items()):
+                for kw in keywords:
+                    if kw.lower() in post["title"].lower():
+                        try:
+                            user = await client.fetch_user(user_id)
+                            await send_discord_dm(user, post, kw)
+                        except Exception as e:
+                            print(f"[유저 전달 오류] {e}")
+                        break
 
 @client.event
 async def on_ready():
-    print(f"로그인 성공: {client.user.name}")
+    # 디스코드에 슬래시 명령어 등록 동기화
+    await tree.sync()
+    print(f"로그인 성공 및 슬래시 명령어 동기화 완료: {client.user.name}")
     client.loop.create_task(monitor_loop())
 
 if __name__ == "__main__":
