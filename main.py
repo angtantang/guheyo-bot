@@ -44,31 +44,32 @@ seen_post_ids = set()
 
 # -------------------- [ 크롤링 함수 ] --------------------
 def fetch_latest_posts():
-  url = "https://guheyo.com"
+  # 장터 판매 탭의 실제 주소로 변경
+  url = "https://guheyo.com/sell"
   headers = {
       "User-Agent": (
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
           " like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      )
+      ),
+      "RSC": "1",  # Next.js 서버 컴포넌트 데이터 요청 헤더
   }
 
   try:
     response = requests.get(url, headers=headers, timeout=10)
-    print(f"[디버그] 구해요 접속 응답 코드: {response.status_code}")
+    print(f"[디버그] 구해요 판매탭 접속 응답 코드: {response.status_code}")
 
     if response.status_code != 200:
       return []
 
     soup = BeautifulSoup(response.text, "html.parser")
-    posts = []
+posts = []
 
-    articles = soup.select(".post-item, article, tr.board-list, .list-item")
+    # 판매 탭 페이지 내의 게시글 카드 선택자 탐색
+    articles = soup.select(".post-item, article, tr.board-list, .list-item, div[class*='item']")
     print(f"[디버그] 찾아낸 게시글 수: {len(articles)}")
 
     for article in articles:
-      link_tag = article.select_one("a[href*='/post/']") or article.select_one(
-          "a"
-      )
+      link_tag = article.select_one("a[href*='/post/']") or article.select_one("a")
       if not link_tag or not link_tag.get("href"):
         continue
 
@@ -88,10 +89,10 @@ def fetch_latest_posts():
       price_tag = article.select_one(".price")
       price = price_tag.get_text(strip=True) if price_tag else "가격 미기재"
 
-      tag_img = article.select_one("img")
+      img_tag = article.select_one("img")
       img_url = ""
-      if tag_img and tag_img.get("src"):
-        src = tag_img["src"]
+      if img_tag and img_tag.get("src"):
+        src = img_tag["src"]
         img_url = src if src.startswith("http") else f"https://guheyo.com{src}"
 
       content_text = ""
@@ -236,7 +237,7 @@ async def send_discord_dm(user, post, matched_keyword):
 
 @tasks.loop(seconds=CHECK_INTERVAL)
 async def monitor_loop():
-  print("[디버그] 60초 주기로 새 글을 확인합니다...")
+  print("[디버그] 60초 주기로 판매탭 새 글을 확인합니다...")
   posts = fetch_latest_posts()
 
   if not posts:
@@ -265,7 +266,7 @@ async def monitor_loop():
 async def before_monitor_loop():
   print("[디버그] 모니터링 루프 대기 중...")
   await client.wait_until_ready()
-  print("[디버그] 봇 준비 완료, 최초 게시글 캐싱 중...")
+  print("[디버그] 봇 준비 완료, 최초 판매탭 게시글 캐싱 중...")
   initial_posts = fetch_latest_posts()
   for p in initial_posts:
     seen_post_ids.add(p["id"])
