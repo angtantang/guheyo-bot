@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import requests
 from threading import Thread
 from bs4 import BeautifulSoup
 import discord
