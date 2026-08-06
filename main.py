@@ -11,7 +11,7 @@ import requests
 
 # ==================== [ 환경 변수 설정 ] ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHECK_INTERVAL = 60  # 크롤링 주기 (초 단위)
+CHECK_INTERVAL = 30  # 더 빠른 감지를 위해 30초로 단축
 # ============================================================
 
 # Render 24시간 구동용 웹서버
@@ -37,22 +37,21 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# 유저별 키워드 저장소 { user_id: ["hhkb", "상우"] } (소문자로 저장)
 user_keywords = {}
 seen_post_ids = set()
 
 
-# -------------------- [ 크롤링 함수 (API 방식) ] --------------------
+# -------------------- [ 크롤링 함수 (개선된 버전) ] --------------------
 def fetch_latest_posts():
-  # Next.js RSC(React Server Component) 요청 주소 활용
   url = "https://guheyo.com/sell"
   headers = {
       "User-Agent": (
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
           " like Gecko) Chrome/120.0.0.0 Safari/537.36"
       ),
-      "RSC": "1",
-      "Accept": "text/x-component",
+      "Accept": (
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+      ),
   }
 
   try:
@@ -65,56 +64,53 @@ def fetch_latest_posts():
     soup = BeautifulSoup(response.text, "html.parser")
     posts = []
 
-    # 텍스트 내에서 게시글 링크나 카드 요소를 정밀 탐색
-    articles = soup.select("a[href*='/post/'], article, div[class*='item']")
-    print(f"[디버그] 찾아낸 게시글 요소 수: {len(articles)}")
+    # /offer/ 또는 /post/ 가 포함된 모든 링크 요소를 정밀 탐색
+    links = soup.select("a[href*='/offer/'], a[href*='/post/']")
+    print(f"[디버그] 찾아낸 글 링크 수: {len(links)}")
 
-    for article in articles:
-      link_tag = (
-          article
-          if article.name == "a" and "/post/" in article.get("href", "")
-          else article.select_one("a[href*='/post/']")
-      )
-      if not link_tag or not link_tag.get("href"):
+    for tag in links:
+      rel_url = tag.get("href")
+      if not rel_url:
         continue
 
-      rel_url = link_tag["href"]
       post_url = (
           rel_url
           if rel_url.startswith("http")
           else f"https://guheyo.com{rel_url}"
       )
 
-      post_id_match = re.search(r"/(\d+)", rel_url)
-      post_id = post_id_match.group(1) if post_id_match else rel_url
-
-      # 중복 방지를 위해 이미 담긴 아이디면 스킵
-      if any(p["id"] == post_id for p in posts):
+      # 고유 식별자 추출
+      post_id = rel_url.split("/")[-1].split("?")[0]
+      if not post_id or any(p["id"] == post_id for p in posts):
         continue
 
-      title = link_tag.get_text(strip=True)
+      title = tag.get_text(strip=True)
       if not title or len(title) < 2:
-        title_tag = article.select_one(".title") or article.find(
-            ["h2", "h3", "span"]
-        )
-        title = title_tag.get_text(strip=True) if title_tag else "제목 없음"
+        parent = tag.find_parent(["div", "article", "tr"])
+        if parent:
+          title_elem = parent.select_one(".title, h2, h3, span")
+          title = (
+              title_elem.get_text(strip=True) if title_elem else "제목 없음"
+          )
+        else:
+          title = "제목 없음"
 
-      price_tag = article.select_one(".price") or article.find(
-          string=re.compile(r"원")
-      )
-      price = (
-          price_tag.get_text(strip=True)
-          if hasattr(price_tag, "get_text")
-          else (str(price_tag).strip() if price_tag else "가격 미기재")
-      )
-
-      img_tag = article.select_one("img")
+      # 가격 정보 탐색
+      parent_box = tag.find_parent(["div", "article", "tr"])
+      price = "가격 미기재"
       img_url = ""
-      if img_tag and img_tag.get("src"):
-        src = img_tag["src"]
-        img_url = src if src.startswith("http") else f"https://guheyo.com{src}"
 
-      full_text = f"{title}"
+      if parent_box:
+        price_elem = parent_box.select_one(
+            ".price, [class*='price'], span[class*='text-']"
+        )
+        if price_elem:
+          price = price_elem.get_text(strip=True)
+
+        img_elem = parent_box.select_one("img")
+        if img_elem and img_elem.get("src"):
+          src = img_elem["src"]
+          img_url = src if src.startswith("http") else f"https://guheyo.com{src}"
 
       posts.append({
           "id": post_id,
@@ -122,7 +118,7 @@ def fetch_latest_posts():
           "price": price,
           "url": post_url,
           "image_url": img_url,
-          "full_text": full_text,
+          "full_text": title,
       })
 
     print(f"[디버그] 최종 수집된 유효 게시글 수: {len(posts)}")
@@ -155,14 +151,13 @@ async def add_keyword(interaction: discord.Interaction, 키워드: str):
 
   if clean_kw in user_keywords[user_id]:
     await interaction.response.send_message(
-        f"`{clean_kw}`(은)는 이미 등록된 키워드입니다 (대소문자 구분 안 함).",
-        ephemeral=True,
+        f"`{clean_kw}`(은)는 이미 등록된 키워드입니다.", ephemeral=True
     )
     return
 
   user_keywords[user_id].append(clean_kw)
   await interaction.response.send_message(
-      f"✅ 키워드 **`{clean_kw}`**(이)가 등록되었습니다! (대소문자 구분 안 함, 현재"
+      f"✅ 키워드 **`{clean_kw}`**(이)가 등록되었습니다! (현재"
       f" {len(user_keywords[user_id])}/5개)",
       ephemeral=True,
   )
@@ -209,13 +204,11 @@ async def help_command(interaction: discord.Interaction):
   embed = discord.Embed(
       title="AKNotifier — 구해요 키워드 DM 알림",
       description=(
-          "`/판매알림등록 [키워드]` — 판매글 제목·본문에 키워드가 있을 때 DM 알림 (최대"
-          " 5개, 대소문자 미구분)\n`/판매알림삭제 [키워드]` — 등록된 알림 삭제\n`/알림목록`"
-          " — 내가 등록한 알림 목록 확인"
+          "`/판매알림등록 [키워드]` — 판매글에 키워드가 있을 때 DM 알림\n`/판매알림삭제"
+          " [키워드]` — 등록된 알림 삭제\n`/알림목록` — 내가 등록한 알림 목록 확인"
       ),
       color=0x2b2d31,
   )
-  embed.set_footer(text="알림은 봇 DM으로 전송됩니다.")
   await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -244,7 +237,7 @@ async def send_discord_dm(user, post, matched_keyword):
 
 @tasks.loop(seconds=CHECK_INTERVAL)
 async def monitor_loop():
-  print("[디버그] 60초 주기로 판매탭 새 글을 확인합니다...")
+  print("[디버그] 판매탭 새 글을 확인합니다...")
   posts = fetch_latest_posts()
 
   if not posts:
@@ -256,7 +249,7 @@ async def monitor_loop():
       continue
 
     seen_post_ids.add(post["id"])
-    post_full_text = post.get("full_text", post["title"]).lower()
+    post_full_text = post.get("full_text", "").lower()
 
     for user_id, keywords in list(user_keywords.items()):
       for kw in keywords:
@@ -271,19 +264,18 @@ async def monitor_loop():
 
 @monitor_loop.before_loop
 async def before_monitor_loop():
-  print("[디버그] 모니터링 루프 대기 중...")
   await client.wait_until_ready()
-  print("[디버그] 봇 준비 완료, 최초 판매탭 게시글 캐싱 중...")
+  print("[디버그] 초기 게시글 캐싱 중...")
   initial_posts = fetch_latest_posts()
   for p in initial_posts:
     seen_post_ids.add(p["id"])
-  print(f"[디버그] 초기 캐싱 완료 (총 {len(seen_post_ids)}개 게시글 인식)")
+  print(f"[디버그] 초기 캐싱 완료 (총 {len(seen_post_ids)}개 인식)")
 
 
 @client.event
 async def on_ready():
   await tree.sync()
-  print(f"로그인 성공 및 슬래시 명령어 동기화 완료: {client.user.name}")
+  print(f"로그인 성공: {client.user.name}")
   if not monitor_loop.is_running():
     monitor_loop.start()
 
