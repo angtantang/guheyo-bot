@@ -44,14 +44,13 @@ seen_post_ids = set()
 
 # -------------------- [ 크롤링 함수 ] --------------------
 def fetch_latest_posts():
-  # 장터 판매 탭의 실제 주소로 변경
   url = "https://guheyo.com/sell"
   headers = {
       "User-Agent": (
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
           " like Gecko) Chrome/120.0.0.0 Safari/537.36"
       ),
-      "RSC": "1",  # Next.js 서버 컴포넌트 데이터 요청 헤더
+      "RSC": "1",
   }
 
   try:
@@ -62,14 +61,17 @@ def fetch_latest_posts():
       return []
 
     soup = BeautifulSoup(response.text, "html.parser")
-posts = []
+    posts = []
 
-    # 판매 탭 페이지 내의 게시글 카드 선택자 탐색
-    articles = soup.select(".post-item, article, tr.board-list, .list-item, div[class*='item']")
+    articles = soup.select(
+        ".post-item, article, tr.board-list, .list-item, div[class*='item']"
+    )
     print(f"[디버그] 찾아낸 게시글 수: {len(articles)}")
 
     for article in articles:
-      link_tag = article.select_one("a[href*='/post/']") or article.select_one("a")
+      link_tag = article.select_one("a[href*='/post/']") or article.select_one(
+          "a"
+      )
       if not link_tag or not link_tag.get("href"):
         continue
 
