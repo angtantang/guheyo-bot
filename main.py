@@ -42,8 +42,9 @@ user_keywords = {}
 seen_post_ids = set()
 
 
-# -------------------- [ 크롤링 함수 ] --------------------
+# -------------------- [ 크롤링 함수 (API 방식) ] --------------------
 def fetch_latest_posts():
+  # Next.js RSC(React Server Component) 요청 주소 활용
   url = "https://guheyo.com/sell"
   headers = {
       "User-Agent": (
@@ -51,6 +52,7 @@ def fetch_latest_posts():
           " like Gecko) Chrome/120.0.0.0 Safari/537.36"
       ),
       "RSC": "1",
+      "Accept": "text/x-component",
   }
 
   try:
@@ -63,14 +65,15 @@ def fetch_latest_posts():
     soup = BeautifulSoup(response.text, "html.parser")
     posts = []
 
-    articles = soup.select(
-        ".post-item, article, tr.board-list, .list-item, div[class*='item']"
-    )
-    print(f"[디버그] 찾아낸 게시글 수: {len(articles)}")
+    # 텍스트 내에서 게시글 링크나 카드 요소를 정밀 탐색
+    articles = soup.select("a[href*='/post/'], article, div[class*='item']")
+    print(f"[디버그] 찾아낸 게시글 요소 수: {len(articles)}")
 
     for article in articles:
-      link_tag = article.select_one("a[href*='/post/']") or article.select_one(
-          "a"
+      link_tag = (
+          article
+          if article.name == "a" and "/post/" in article.get("href", "")
+          else article.select_one("a[href*='/post/']")
       )
       if not link_tag or not link_tag.get("href"):
         continue
@@ -85,11 +88,25 @@ def fetch_latest_posts():
       post_id_match = re.search(r"/(\d+)", rel_url)
       post_id = post_id_match.group(1) if post_id_match else rel_url
 
-      title_tag = article.select_one(".title") or link_tag
-      title = title_tag.get_text(strip=True) if title_tag else "제목 없음"
+      # 중복 방지를 위해 이미 담긴 아이디면 스킵
+      if any(p["id"] == post_id for p in posts):
+        continue
 
-      price_tag = article.select_one(".price")
-      price = price_tag.get_text(strip=True) if price_tag else "가격 미기재"
+      title = link_tag.get_text(strip=True)
+      if not title or len(title) < 2:
+        title_tag = article.select_one(".title") or article.find(
+            ["h2", "h3", "span"]
+        )
+        title = title_tag.get_text(strip=True) if title_tag else "제목 없음"
+
+      price_tag = article.select_one(".price") or article.find(
+          string=re.compile(r"원")
+      )
+      price = (
+          price_tag.get_text(strip=True)
+          if hasattr(price_tag, "get_text")
+          else (str(price_tag).strip() if price_tag else "가격 미기재")
+      )
 
       img_tag = article.select_one("img")
       img_url = ""
@@ -97,20 +114,7 @@ def fetch_latest_posts():
         src = img_tag["src"]
         img_url = src if src.startswith("http") else f"https://guheyo.com{src}"
 
-      content_text = ""
-      try:
-        detail_resp = requests.get(post_url, headers=headers, timeout=5)
-        if detail_resp.status_code == 200:
-          detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
-          body_elem = detail_soup.select_one(
-              ".post-content, .content, article, .board-view"
-          )
-          if body_elem:
-            content_text = body_elem.get_text(strip=True)
-      except Exception:
-        pass
-
-      full_text = f"{title} {content_text}"
+      full_text = f"{title}"
 
       posts.append({
           "id": post_id,
@@ -121,6 +125,7 @@ def fetch_latest_posts():
           "full_text": full_text,
       })
 
+    print(f"[디버그] 최종 수집된 유효 게시글 수: {len(posts)}")
     return posts
   except Exception as e:
     print(f"[크롤링 에러] {e}")
