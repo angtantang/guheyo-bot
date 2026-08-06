@@ -154,7 +154,7 @@ async def add_keyword(interaction: discord.Interaction, 키워드: str):
 
   user_keywords[user_id].append(clean_kw)
   await interaction.response.send_message(
-      f"✅ 키워드 **`{clean_kw}`**(이)가 등록되었습니다! (대소문자 구분 없음, 현재"
+      f"✅ 키워드 **`{clean_kw}`**(이)가 등록되었습니다! (대소문자 구분 안 함, 현재"
       f" {len(user_keywords[user_id])}/5개)",
       ephemeral=True,
   )
@@ -235,6 +235,7 @@ async def send_discord_dm(user, post, matched_keyword):
 
 
 async def monitor_loop():
+  print("[디버그] 모니터링 루프가 시작되었습니다!")
   await client.wait_until_ready()
 
   initial_posts = fetch_latest_posts()
@@ -242,6 +243,7 @@ async def monitor_loop():
     seen_post_ids.add(p["id"])
 
   while not client.is_closed():
+    print("[디버그] 60초 주기로 새 글을 확인합니다...")
     await asyncio.sleep(CHECK_INTERVAL)
     posts = fetch_latest_posts()
 
