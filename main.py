@@ -1,13 +1,13 @@
 import asyncio
 import os
 import re
-import requests
 from threading import Thread
 from bs4 import BeautifulSoup
 import discord
 from discord import app_commands
 from discord.ext import tasks
 from flask import Flask
+import requests
 
 # ==================== [ 환경 변수 설정 ] ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -88,10 +88,10 @@ def fetch_latest_posts():
       price_tag = article.select_one(".price")
       price = price_tag.get_text(strip=True) if price_tag else "가격 미기재"
 
-      img_tag = article.select_one("img")
+      tag_img = article.select_one("img")
       img_url = ""
-      if img_tag and img_tag.get("src"):
-        src = img_tag["src"]
+      if tag_img and tag_img.get("src"):
+        src = tag_img["src"]
         img_url = src if src.startswith("http") else f"https://guheyo.com{src}"
 
       content_text = ""
