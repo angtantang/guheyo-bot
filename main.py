@@ -5,6 +5,7 @@ from threading import Thread
 from bs4 import BeautifulSoup
 import discord
 from discord import app_commands
+from discord.ext import tasks
 from flask import Flask
 
 # ==================== [ 환경 변수 설정 ] ====================
@@ -92,7 +93,6 @@ def fetch_latest_posts():
         src = img_tag["src"]
         img_url = src if src.startswith("http") else f"https://guheyo.com{src}"
 
-      # --- 본문(내용) 추가 수집 ---
       content_text = ""
       try:
         detail_resp = requests.get(post_url, headers=headers, timeout=5)
@@ -106,7 +106,6 @@ def fetch_latest_posts():
       except Exception:
         pass
 
-      # 제목 + 본문 통합 텍스트
       full_text = f"{title} {content_text}"
 
       posts.append({
@@ -211,7 +210,7 @@ async def help_command(interaction: discord.Interaction):
   await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# -------------------- [ 모니터링 루프 ] --------------------
+# -------------------- [ 모니터링 태스크 루프 ] --------------------
 async def send_discord_dm(user, post, matched_keyword):
   embed = discord.Embed(title="판매글 알림", color=0x2b2d31)
   embed.add_field(
@@ -234,43 +233,50 @@ async def send_discord_dm(user, post, matched_keyword):
     print(f"[DM 발송 실패] {e}")
 
 
+@tasks.loop(seconds=CHECK_INTERVAL)
 async def monitor_loop():
-  print("[디버그] 모니터링 루프가 시작되었습니다!")
-  await client.wait_until_ready()
+  print("[디버그] 60초 주기로 새 글을 확인합니다...")
+  posts = fetch_latest_posts()
 
+  if not posts:
+    print("[디버그] 수집된 글이 없습니다.")
+    return
+
+  for post in reversed(posts):
+    if post["id"] in seen_post_ids:
+      continue
+
+    seen_post_ids.add(post["id"])
+    post_full_text = post.get("full_text", post["title"]).lower()
+
+    for user_id, keywords in list(user_keywords.items()):
+      for kw in keywords:
+        if kw in post_full_text:
+          try:
+            user = await client.fetch_user(user_id)
+            await send_discord_dm(user, post, kw)
+          except Exception as e:
+            print(f"[유저 전달 오류] {e}")
+          break
+
+
+@monitor_loop.before_loop
+async def before_monitor_loop():
+  print("[디버그] 모니터링 루프 대기 중...")
+  await client.wait_until_ready()
+  print("[디버그] 봇 준비 완료, 최초 게시글 캐싱 중...")
   initial_posts = fetch_latest_posts()
   for p in initial_posts:
     seen_post_ids.add(p["id"])
-
-  while not client.is_closed():
-    print("[디버그] 60초 주기로 새 글을 확인합니다...")
-    await asyncio.sleep(CHECK_INTERVAL)
-    posts = fetch_latest_posts()
-
-    for post in reversed(posts):
-      if post["id"] in seen_post_ids:
-        continue
-
-      seen_post_ids.add(post["id"])
-
-      post_full_text = post.get("full_text", post["title"]).lower()
-
-      for user_id, keywords in list(user_keywords.items()):
-        for kw in keywords:
-          if kw in post_full_text:
-            try:
-              user = await client.fetch_user(user_id)
-              await send_discord_dm(user, post, kw)
-            except Exception as e:
-              print(f"[유저 전달 오류] {e}")
-            break
+  print(f"[디버그] 초기 캐싱 완료 (총 {len(seen_post_ids)}개 게시글 인식)")
 
 
 @client.event
 async def on_ready():
   await tree.sync()
   print(f"로그인 성공 및 슬래시 명령어 동기화 완료: {client.user.name}")
-  client.loop.create_task(monitor_loop())
+  if not monitor_loop.is_running():
+    monitor_loop.start()
 
 
 if __name__ == "__main__":
