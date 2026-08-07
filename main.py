@@ -11,7 +11,7 @@ import requests
 
 # ==================== [ 환경 변수 설정 ] ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHECK_INTERVAL = 30  # 30초 주기
+CHECK_INTERVAL = 60  # 30초 주기
 # ============================================================
 
 # Render 24시간 구동용 웹서버
@@ -41,8 +41,9 @@ user_keywords = {}
 seen_post_ids = set()
 
 
-# -------------------- [ 크롤링 함수 (API / RSC 헤더 대응) ] --------------------
+# -------------------- [ 크롤링 함수 (Next.js RSC 스트림 정밀 파싱) ] --------------------
 def fetch_latest_posts():
+  # _rsc 헤더를 포함하여 Next.js 서버 컴포넌트 데이터를 직접 요청합니다.
   url = "https://guheyo.com/sell"
   headers = {
       "User-Agent": (
@@ -50,7 +51,7 @@ def fetch_latest_posts():
           " like Gecko) Chrome/120.0.0.0 Safari/537.36"
       ),
       "Accept": "text/x-component, text/html,application/xhtml+xml",
-      "RSC": "1",  # Next.js 서버 컴포넌트 요청 헤더 강제 주입
+      "RSC": "1",
   }
 
   try:
@@ -63,41 +64,45 @@ def fetch_latest_posts():
     posts = []
     text_data = response.text
 
-    # Next.js RSC 페이로드 또는 HTML 내에서 /offer/ 또는 /post/ 패턴 추출
-    found_paths = re.findall(r"/(?:offer|post)/[a-zA-Z0-9\-_]+", text_data)
+    # 응답 데이터(텍스트 스트림)에서 /offer/ 뒤에 붙는 고유 슬러그 및 ID 구조를 찾아냅니다.
+    # 예: /offer/TGR-MIA-cyan-... 형태 추출
+    found_slugs = re.findall(
+        r"offer[,\/]+([a-zA-Z0-9\-_%]+(?:-[a-zA-Z0-9\-_%]+)+)", text_data
+    )
 
-    for path in found_paths:
-      # 중복 제거 및 자산 파일(.css, .js 등) 제외
-      if any(ext in path for ext in [".css", ".js", ".png", ".jpg", ".ico"]):
-        continue
+    # 중복 제거 및 유효 슬러그 필터링
+    unique_slugs = []
+    for s in found_slugs:
+      if len(s) > 10 and s not in unique_slugs:
+        unique_slugs.append(s)
 
-      post_id = path.split("/")[-1]
+    print(f"[디버그] 찾아낸 게시글 슬러그 수: {len(unique_slugs)}")
+
+    for slug in unique_slugs[:15]:  # 상위 15개만 빠르게 확인
+      post_id = slug.split("-")[-1]  # 마지막 토큰 등을 ID로 활용
       if any(p["id"] == post_id for p in posts):
         continue
 
-      post_url = f"https://guheyo.com{path}"
+      post_url = f"https://guheyo.com/offer/{slug}"
 
-      # 제목 대용으로 경로 내 키워드 조합 활용 또는 기본값 부여
-      # (상세 페이지에서 구체적인 텍스트를 파싱해옵니다)
-      title = "판매글"
-      price = "가격 확인 필요"
+      title = slug.replace("-", " ")  # 슬러그를 기본 제목으로 가공
+      price = "가격 확인"
       img_url = ""
 
-      # 개별 상세 페이지에 직접 접근하여 정확한 제목과 본문 내용을 긁어옵니다
+      # 개별 상세 페이지에 접속하여 정확한 제목/가격/이미지를 긁어옵니다.
       try:
         detail_resp = requests.get(post_url, headers=headers, timeout=5)
         if detail_resp.status_code == 200:
           detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
 
-          # 상세 페이지 제목 탐색
-          title_elem = detail_soup.select_one(
-              "h1, title, [class*='title'], meta[property='og:title']"
-          )
-          if title_elem:
-            if title_elem.name == "meta":
-              title = title_elem.get("content", "제목 없음")
-            else:
-              title = title_elem.get_text(strip=True)
+          # og:title 메타태그나 h1에서 정확한 판매글 제목 추출
+          meta_title = detail_soup.select_one("meta[property='og:title']")
+          if meta_title and meta_title.get("content"):
+            title = meta_title["content"]
+          else:
+            h1 = detail_soup.select_one("h1")
+            if h1:
+              title = h1.get_text(strip=True)
 
           # 가격 탐색
           price_elem = detail_soup.find(string=re.compile(r"원"))
@@ -105,19 +110,9 @@ def fetch_latest_posts():
             price = str(price_elem).strip()
 
           # 이미지 탐색
-          img_elem = detail_soup.select_one(
-              "meta[property='og:image'], img[class*='image']"
-          )
-          if img_elem:
-            src = (
-                img_elem.get("content")
-                if img_elem.name == "meta"
-                else img_elem.get("src")
-            )
-            if src:
-              img_url = (
-                  src if src.startswith("http") else f"https://guheyo.com{src}"
-              )
+          meta_img = detail_soup.select_one("meta[property='og:image']")
+          if meta_img and meta_img.get("content"):
+            img_url = meta_img["content"]
       except Exception:
         pass
 
@@ -127,7 +122,7 @@ def fetch_latest_posts():
           "price": price,
           "url": post_url,
           "image_url": img_url,
-          "full_text": f"{title}",
+          "full_text": f"{title}".lower(),
       })
 
     print(f"[디버그] 최종 수집된 유효 게시글 수: {len(posts)}")
@@ -258,7 +253,7 @@ async def monitor_loop():
       continue
 
     seen_post_ids.add(post["id"])
-    post_full_text = post.get("full_text", "").lower()
+    post_full_text = post.get("full_text", "")
 
     for user_id, keywords in list(user_keywords.items()):
       for kw in keywords:
