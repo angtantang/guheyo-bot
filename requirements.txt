@@ -1,7 +1,4 @@
 discord.py
+flask
 requests
 beautifulsoup4
-flask
-gunicorn
-selenium
-webdriver-manager
