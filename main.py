@@ -1,14 +1,13 @@
 import asyncio
 import os
-import time
+import re
 from threading import Thread
+from bs4 import BeautifulSoup
 import discord
 from discord import app_commands
 from discord.ext import tasks
 from flask import Flask
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
+import requests
 
 # ==================== [ 환경 변수 설정 ] ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -41,51 +40,74 @@ tree = app_commands.CommandTree(client)
 user_keywords = {}
 seen_post_ids = set()
 
-# 셀레늄 옵션 설정 (Render / 리눅스 환경 최적화)
-chrome_options = Options()
-chrome_options.add_argument("--headless")
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.add_argument("--disable-gpu")
-driver = webdriver.Chrome(options=chrome_options)
 
+# -------------------- [ 크롤링 함수 (안정형 API/헤더 우회 방식) ] --------------------
+def fetch_latest_posts():
+  url = "https://guheyo.com/sell"
+  headers = {
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+          " like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      ),
+      "Accept": (
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+      ),
+      "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+      "Referer": "https://guheyo.com/",
+  }
 
-# -------------------- [ 셀레늄 크롤링 함수 ] --------------------
-def fetch_latest_posts_selenium():
   try:
-    print("[디버그] 셀레늄으로 구해요 판매탭 접속 중...")
-    driver.get("https://guheyo.com/sell")
-    time.sleep(4)  # 자바스크립트 렌더링 대기
+    response = requests.get(url, headers=headers, timeout=10)
+    print(f"[디버그] 구해요 판매탭 접속 응답 코드: {response.status_code}")
 
-    elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='/offer/']")
+    if response.status_code != 200:
+      return []
+
+    soup = BeautifulSoup(response.text, "html.parser")
     posts = []
 
-    for el in elements:
-      url = el.get_attribute("href")
-      if not url:
+    # 페이지 내의 모든 /offer/ 링크 추출
+    links = soup.select("a[href*='/offer/']")
+
+    for tag in links:
+      rel_url = tag.get("href")
+      if not rel_url:
         continue
 
-      post_id = url.split("/")[-1].split("?")[0]
-      if any(p["id"] == post_id for p in posts):
+      post_url = (
+          rel_url
+          if rel_url.startswith("http")
+          else f"https://guheyo.com{rel_url}"
+      )
+      post_id = rel_url.split("/")[-1].split("?")[0]
+
+      if not post_id or any(p["id"] == post_id for p in posts):
         continue
 
-      title = el.text.strip()
+      title = tag.get_text(strip=True)
       if not title or len(title) < 2:
-        title = "판매글"
+        parent = tag.find_parent(["div", "article", "li"])
+        if parent:
+          title_elem = parent.select_one(".title, h2, h3, span, p")
+          title = (
+              title_elem.get_text(strip=True) if title_elem else "판매글 제목 없음"
+          )
+        else:
+          title = "판매글 제목 없음"
 
       posts.append({
           "id": post_id,
           "title": title,
-          "price": "가격 확인 필요",
-          "url": url,
+          "price": "가격 확인",
+          "url": post_url,
           "image_url": "",
           "full_text": title.lower(),
       })
 
-    print(f"[디버그] 셀레늄 수집된 유효 게시글 수: {len(posts)}")
+    print(f"[디버그] 최종 수집된 유효 게시글 수: {len(posts)}")
     return posts
   except Exception as e:
-    print(f"[셀레늄 에러] {e}")
+    print(f"[크롤링 에러] {e}")
     return []
 
 
@@ -196,7 +218,7 @@ async def send_discord_dm(user, post, matched_keyword):
 @tasks.loop(seconds=CHECK_INTERVAL)
 async def monitor_loop():
   print("[디버그] 판매탭 새 글을 확인합니다...")
-  posts = fetch_latest_posts_selenium()
+  posts = fetch_latest_posts()
 
   if not posts:
     print("[디버그] 수집된 글이 없습니다.")
@@ -224,7 +246,7 @@ async def monitor_loop():
 async def before_monitor_loop():
   await client.wait_until_ready()
   print("[디버그] 초기 게시글 캐싱 중...")
-  initial_posts = fetch_latest_posts_selenium()
+  initial_posts = fetch_latest_posts()
   for p in initial_posts:
     seen_post_ids.add(p["id"])
   print(f"[디버그] 초기 캐싱 완료 (총 {len(seen_post_ids)}개 인식)")
