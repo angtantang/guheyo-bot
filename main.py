@@ -11,7 +11,7 @@ import requests
 
 # ==================== [ 환경 변수 설정 ] ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHECK_INTERVAL = 30  # 더 빠른 감지를 위해 30초로 단축
+CHECK_INTERVAL = 30  # 30초 주기
 # ============================================================
 
 # Render 24시간 구동용 웹서버
@@ -41,7 +41,7 @@ user_keywords = {}
 seen_post_ids = set()
 
 
-# -------------------- [ 크롤링 함수 (개선된 버전) ] --------------------
+# -------------------- [ 크롤링 함수 (API / RSC 헤더 대응) ] --------------------
 def fetch_latest_posts():
   url = "https://guheyo.com/sell"
   headers = {
@@ -49,9 +49,8 @@ def fetch_latest_posts():
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
           " like Gecko) Chrome/120.0.0.0 Safari/537.36"
       ),
-      "Accept": (
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-      ),
+      "Accept": "text/x-component, text/html,application/xhtml+xml",
+      "RSC": "1",  # Next.js 서버 컴포넌트 요청 헤더 강제 주입
   }
 
   try:
@@ -61,56 +60,66 @@ def fetch_latest_posts():
     if response.status_code != 200:
       return []
 
-    soup = BeautifulSoup(response.text, "html.parser")
     posts = []
+    text_data = response.text
 
-    # /offer/ 또는 /post/ 가 포함된 모든 링크 요소를 정밀 탐색
-    links = soup.select("a[href*='/offer/'], a[href*='/post/']")
-    print(f"[디버그] 찾아낸 글 링크 수: {len(links)}")
+    # Next.js RSC 페이로드 또는 HTML 내에서 /offer/ 또는 /post/ 패턴 추출
+    found_paths = re.findall(r"/(?:offer|post)/[a-zA-Z0-9\-_]+", text_data)
 
-    for tag in links:
-      rel_url = tag.get("href")
-      if not rel_url:
+    for path in found_paths:
+      # 중복 제거 및 자산 파일(.css, .js 등) 제외
+      if any(ext in path for ext in [".css", ".js", ".png", ".jpg", ".ico"]):
         continue
 
-      post_url = (
-          rel_url
-          if rel_url.startswith("http")
-          else f"https://guheyo.com{rel_url}"
-      )
-
-      # 고유 식별자 추출
-      post_id = rel_url.split("/")[-1].split("?")[0]
-      if not post_id or any(p["id"] == post_id for p in posts):
+      post_id = path.split("/")[-1]
+      if any(p["id"] == post_id for p in posts):
         continue
 
-      title = tag.get_text(strip=True)
-      if not title or len(title) < 2:
-        parent = tag.find_parent(["div", "article", "tr"])
-        if parent:
-          title_elem = parent.select_one(".title, h2, h3, span")
-          title = (
-              title_elem.get_text(strip=True) if title_elem else "제목 없음"
-          )
-        else:
-          title = "제목 없음"
+      post_url = f"https://guheyo.com{path}"
 
-      # 가격 정보 탐색
-      parent_box = tag.find_parent(["div", "article", "tr"])
-      price = "가격 미기재"
+      # 제목 대용으로 경로 내 키워드 조합 활용 또는 기본값 부여
+      # (상세 페이지에서 구체적인 텍스트를 파싱해옵니다)
+      title = "판매글"
+      price = "가격 확인 필요"
       img_url = ""
 
-      if parent_box:
-        price_elem = parent_box.select_one(
-            ".price, [class*='price'], span[class*='text-']"
-        )
-        if price_elem:
-          price = price_elem.get_text(strip=True)
+      # 개별 상세 페이지에 직접 접근하여 정확한 제목과 본문 내용을 긁어옵니다
+      try:
+        detail_resp = requests.get(post_url, headers=headers, timeout=5)
+        if detail_resp.status_code == 200:
+          detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
 
-        img_elem = parent_box.select_one("img")
-        if img_elem and img_elem.get("src"):
-          src = img_elem["src"]
-          img_url = src if src.startswith("http") else f"https://guheyo.com{src}"
+          # 상세 페이지 제목 탐색
+          title_elem = detail_soup.select_one(
+              "h1, title, [class*='title'], meta[property='og:title']"
+          )
+          if title_elem:
+            if title_elem.name == "meta":
+              title = title_elem.get("content", "제목 없음")
+            else:
+              title = title_elem.get_text(strip=True)
+
+          # 가격 탐색
+          price_elem = detail_soup.find(string=re.compile(r"원"))
+          if price_elem:
+            price = str(price_elem).strip()
+
+          # 이미지 탐색
+          img_elem = detail_soup.select_one(
+              "meta[property='og:image'], img[class*='image']"
+          )
+          if img_elem:
+            src = (
+                img_elem.get("content")
+                if img_elem.name == "meta"
+                else img_elem.get("src")
+            )
+            if src:
+              img_url = (
+                  src if src.startswith("http") else f"https://guheyo.com{src}"
+              )
+      except Exception:
+        pass
 
       posts.append({
           "id": post_id,
@@ -118,7 +127,7 @@ def fetch_latest_posts():
           "price": price,
           "url": post_url,
           "image_url": img_url,
-          "full_text": title,
+          "full_text": f"{title}",
       })
 
     print(f"[디버그] 최종 수집된 유효 게시글 수: {len(posts)}")
