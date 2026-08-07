@@ -1,17 +1,18 @@
 import asyncio
 import os
-import re
+import time
 from threading import Thread
-from bs4 import BeautifulSoup
 import discord
 from discord import app_commands
 from discord.ext import tasks
 from flask import Flask
-import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
 
 # ==================== [ 환경 변수 설정 ] ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHECK_INTERVAL = 60  # 30초 주기
+CHECK_INTERVAL = 60  # 60초 주기
 # ============================================================
 
 # Render 24시간 구동용 웹서버
@@ -40,95 +41,51 @@ tree = app_commands.CommandTree(client)
 user_keywords = {}
 seen_post_ids = set()
 
+# 셀레늄 옵션 설정 (Render / 리눅스 환경 최적화)
+chrome_options = Options()
+chrome_options.add_argument("--headless")
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--disable-dev-shm-usage")
+chrome_options.add_argument("--disable-gpu")
+driver = webdriver.Chrome(options=chrome_options)
 
-# -------------------- [ 크롤링 함수 (Next.js RSC 스트림 정밀 파싱) ] --------------------
-def fetch_latest_posts():
-  # _rsc 헤더를 포함하여 Next.js 서버 컴포넌트 데이터를 직접 요청합니다.
-  url = "https://guheyo.com/sell"
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-          " like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      ),
-      "Accept": "text/x-component, text/html,application/xhtml+xml",
-      "RSC": "1",
-  }
 
+# -------------------- [ 셀레늄 크롤링 함수 ] --------------------
+def fetch_latest_posts_selenium():
   try:
-    response = requests.get(url, headers=headers, timeout=10)
-    print(f"[디버그] 구해요 판매탭 접속 응답 코드: {response.status_code}")
+    print("[디버그] 셀레늄으로 구해요 판매탭 접속 중...")
+    driver.get("https://guheyo.com/sell")
+    time.sleep(4)  # 자바스크립트 렌더링 대기
 
-    if response.status_code != 200:
-      return []
-
+    elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='/offer/']")
     posts = []
-    text_data = response.text
 
-    # 응답 데이터(텍스트 스트림)에서 /offer/ 뒤에 붙는 고유 슬러그 및 ID 구조를 찾아냅니다.
-    # 예: /offer/TGR-MIA-cyan-... 형태 추출
-    found_slugs = re.findall(
-        r"offer[,\/]+([a-zA-Z0-9\-_%]+(?:-[a-zA-Z0-9\-_%]+)+)", text_data
-    )
+    for el in elements:
+      url = el.get_attribute("href")
+      if not url:
+        continue
 
-    # 중복 제거 및 유효 슬러그 필터링
-    unique_slugs = []
-    for s in found_slugs:
-      if len(s) > 10 and s not in unique_slugs:
-        unique_slugs.append(s)
-
-    print(f"[디버그] 찾아낸 게시글 슬러그 수: {len(unique_slugs)}")
-
-    for slug in unique_slugs[:15]:  # 상위 15개만 빠르게 확인
-      post_id = slug.split("-")[-1]  # 마지막 토큰 등을 ID로 활용
+      post_id = url.split("/")[-1].split("?")[0]
       if any(p["id"] == post_id for p in posts):
         continue
 
-      post_url = f"https://guheyo.com/offer/{slug}"
-
-      title = slug.replace("-", " ")  # 슬러그를 기본 제목으로 가공
-      price = "가격 확인"
-      img_url = ""
-
-      # 개별 상세 페이지에 접속하여 정확한 제목/가격/이미지를 긁어옵니다.
-      try:
-        detail_resp = requests.get(post_url, headers=headers, timeout=5)
-        if detail_resp.status_code == 200:
-          detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
-
-          # og:title 메타태그나 h1에서 정확한 판매글 제목 추출
-          meta_title = detail_soup.select_one("meta[property='og:title']")
-          if meta_title and meta_title.get("content"):
-            title = meta_title["content"]
-          else:
-            h1 = detail_soup.select_one("h1")
-            if h1:
-              title = h1.get_text(strip=True)
-
-          # 가격 탐색
-          price_elem = detail_soup.find(string=re.compile(r"원"))
-          if price_elem:
-            price = str(price_elem).strip()
-
-          # 이미지 탐색
-          meta_img = detail_soup.select_one("meta[property='og:image']")
-          if meta_img and meta_img.get("content"):
-            img_url = meta_img["content"]
-      except Exception:
-        pass
+      title = el.text.strip()
+      if not title or len(title) < 2:
+        title = "판매글"
 
       posts.append({
           "id": post_id,
           "title": title,
-          "price": price,
-          "url": post_url,
-          "image_url": img_url,
-          "full_text": f"{title}".lower(),
+          "price": "가격 확인 필요",
+          "url": url,
+          "image_url": "",
+          "full_text": title.lower(),
       })
 
-    print(f"[디버그] 최종 수집된 유효 게시글 수: {len(posts)}")
+    print(f"[디버그] 셀레늄 수집된 유효 게시글 수: {len(posts)}")
     return posts
   except Exception as e:
-    print(f"[크롤링 에러] {e}")
+    print(f"[셀레늄 에러] {e}")
     return []
 
 
@@ -228,9 +185,6 @@ async def send_discord_dm(user, post, matched_keyword):
   now_str = discord.utils.utcnow().strftime("%Y년 %m월 %d일 %p %I:%M")
   embed.add_field(name="등록", value=f"`{now_str}`", inline=False)
 
-  if post["image_url"]:
-    embed.set_thumbnail(url=post["image_url"])
-
   header_text = f"판매 • [{matched_keyword}]\n{post['title']}"
 
   try:
@@ -242,7 +196,7 @@ async def send_discord_dm(user, post, matched_keyword):
 @tasks.loop(seconds=CHECK_INTERVAL)
 async def monitor_loop():
   print("[디버그] 판매탭 새 글을 확인합니다...")
-  posts = fetch_latest_posts()
+  posts = fetch_latest_posts_selenium()
 
   if not posts:
     print("[디버그] 수집된 글이 없습니다.")
@@ -270,7 +224,7 @@ async def monitor_loop():
 async def before_monitor_loop():
   await client.wait_until_ready()
   print("[디버그] 초기 게시글 캐싱 중...")
-  initial_posts = fetch_latest_posts()
+  initial_posts = fetch_latest_posts_selenium()
   for p in initial_posts:
     seen_post_ids.add(p["id"])
   print(f"[디버그] 초기 캐싱 완료 (총 {len(seen_post_ids)}개 인식)")
